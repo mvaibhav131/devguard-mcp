@@ -1,0 +1,88 @@
+import { randomUUID } from 'node:crypto';
+
+import { DevGuardError } from '../shared/errors.js';
+import type { Limits } from '../shared/limits.js';
+import type { Logger } from '../shared/logger.js';
+
+/** The part of the SDK handler context that DevGuard uses. */
+export interface ToolContextLike {
+  mcpReq: { signal: AbortSignal };
+}
+
+export interface ToolRuntime {
+  logger: Logger;
+  limits: Limits;
+}
+
+// `type` aliases on purpose: unlike interfaces they are assignable to the SDK result type, which has an index signature.
+export type TextBlock = {
+  type: 'text';
+  text: string;
+};
+
+export type ToolSuccess<T> = {
+  content: TextBlock[];
+  structuredContent: T;
+};
+
+export type ToolFailure = {
+  content: TextBlock[];
+  isError: true;
+};
+
+/** Every DevGuard tool only reads. Clients may use these hints to skip confirmation prompts. */
+export const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+let requestCounter = 0;
+
+function failure(text: string): ToolFailure {
+  return { content: [{ type: 'text', text }], isError: true };
+}
+
+function elapsedMs(started: number): number {
+  return Math.round(performance.now() - started);
+}
+
+/**
+ * Wraps a tool implementation with the behaviour every tool shares:
+ * a deadline combined with client cancellation, request logging, and error mapping.
+ * Expected failures (DevGuardError) become readable tool errors; anything else is logged in detail
+ * and reported to the model only as an opaque reference.
+ */
+export function toolHandler<Args, Payload extends object>(
+  name: string,
+  runtime: ToolRuntime,
+  run: (args: Args, signal: AbortSignal) => Promise<Payload>,
+): (args: Args, ctx: ToolContextLike) => Promise<ToolSuccess<Payload> | ToolFailure> {
+  return async (args, ctx) => {
+    const log = runtime.logger.child({ tool: name, requestId: `${name}-${++requestCounter}` });
+    const started = performance.now();
+    const signal = AbortSignal.any([ctx.mcpReq.signal, AbortSignal.timeout(runtime.limits.toolTimeoutMs)]);
+
+    log.debug('tool call started');
+    try {
+      const payload = await run(args, signal);
+      const text = JSON.stringify(payload);
+      log.info('tool call succeeded', { durationMs: elapsedMs(started), responseBytes: Buffer.byteLength(text, 'utf8') });
+      return { content: [{ type: 'text', text }], structuredContent: payload };
+    } catch (error) {
+      if (ctx.mcpReq.signal.aborted) {
+        // The SDK discards the response of a cancelled request.
+        log.info('tool call cancelled', { durationMs: elapsedMs(started) });
+        return failure('CANCELLED: The request was cancelled.');
+      }
+      if (error instanceof DevGuardError) {
+        log.warn('tool call failed', { code: error.code, durationMs: elapsedMs(started), error });
+        return failure(`${error.code}: ${error.message}${error.hint ? ` Hint: ${error.hint}` : ''}`);
+      }
+      const reference = randomUUID().slice(0, 8);
+      log.error('tool call crashed', { reference, durationMs: elapsedMs(started), error });
+      return failure(`INTERNAL: Unexpected error (reference ${reference}). Details are in the DevGuard server log.`);
+    }
+  };
+}

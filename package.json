@@ -1,6 +1,6 @@
 {
   "name": "devguard-mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Deterministic engineering analysis MCP server for AI coding assistants.",
   "private": true,
   "type": "module",
@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:stdio": "npm run build && vitest run --config vitest.stdio.config.ts",
     "test:watch": "vitest"
   },
   "devDependencies": {
