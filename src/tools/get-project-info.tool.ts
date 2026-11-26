@@ -27,6 +27,8 @@ export const projectInfoOutputSchema = z.object({
     toolTimeoutMs: z.number(),
     maxFilesScanned: z.number(),
     maxHunksPerFile: z.number(),
+    maxSourceFiles: z.number(),
+    maxSourceFileBytes: z.number(),
     defaultPageSize: z.number(),
     maxPageSize: z.number(),
   }),

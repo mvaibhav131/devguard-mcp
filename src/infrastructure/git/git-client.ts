@@ -136,4 +136,13 @@ export class GitClient implements DiffGitPort {
     });
     return { data: output.stdout, truncated: output.truncated };
   }
+
+  /** Every file git knows about (tracked, plus untracked and not ignored when requested), NUL separated. */
+  async listFiles(request: { includeUntracked: boolean; maxBytes: number; signal?: AbortSignal | undefined }): Promise<GitData> {
+    const args = ['ls-files', '-z', '--cached'];
+    if (request.includeUntracked) args.push('--others', '--exclude-standard');
+
+    const output = await this.runner.run({ args: [...args, '--'], maxBytes: request.maxBytes, signal: request.signal });
+    return { data: output.stdout, truncated: output.truncated };
+  }
 }

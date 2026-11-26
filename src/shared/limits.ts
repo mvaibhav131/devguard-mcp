@@ -11,6 +11,10 @@ export interface Limits {
   patchOutputCapBytes: number;
   maxFilesScanned: number;
   maxHunksPerFile: number;
+  /** Source files read to build the import graph. */
+  maxSourceFiles: number;
+  maxSourceFileBytes: number;
+  readConcurrency: number;
   shutdownTimeoutMs: number;
 }
 
@@ -22,11 +26,17 @@ export const DEFAULT_LIMITS: Readonly<Limits> = {
   patchOutputCapBytes: 2 * 1024 * 1024,
   maxFilesScanned: 5_000,
   maxHunksPerFile: 20,
+  maxSourceFiles: 5_000,
+  maxSourceFileBytes: 512 * 1024,
+  readConcurrency: 16,
   shutdownTimeoutMs: 3_000,
 };
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 200;
 export const MAX_PATHS_PER_REQUEST = 20;
+export const MAX_EXPLICIT_FILES = 100;
+export const DEFAULT_IMPACT_DEPTH = 2;
+export const MAX_IMPACT_DEPTH = 3;
 export const MAX_PATH_LENGTH = 1024;
 export const MAX_REF_LENGTH = 200;

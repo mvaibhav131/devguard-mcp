@@ -2,7 +2,7 @@
 
 An extensible [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI coding assistants **deterministic** engineering facts about a Git repository. The assistant (for example GitHub Copilot in VS Code) interprets the facts; DevGuard never calls an LLM.
 
-Status: Phase 1 (foundation). Planned next: code review rules, change impact analysis, test discovery, risk assessment. TypeScript and JavaScript only for v1.
+Status: Phases 1 and 3 done (foundation, git diff, change impact, test discovery). Planned next: review rules (Phase 2), risk assessment (Phase 4). TypeScript and JavaScript only for v1.
 
 ## Tools
 
@@ -10,8 +10,10 @@ Status: Phase 1 (foundation). Planned next: code review rules, change impact ana
 |---|---|
 | `get_project_info` | Connectivity check: server version, runtime, git version, branch, HEAD, active limits |
 | `analyze_git_diff` | Changed files with status, additions/deletions, language and changed line ranges for `workingTree`, `staged` or `range` changes. Paged and size-limited |
+| `analyze_change_impact` | Which other files may be affected: follows imports backwards from the changed files, with import chains, hotspots, unresolved imports and an explicit list of limitations. Heuristic |
+| `discover_tests` | Detects the test framework, maps changed files to tests (imports or file name), lists changed files without a mapped test and suggests commands to run (never runs them). Heuristic |
 
-Both tools are read-only. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts, limits and security decisions.
+All tools are read-only. Impact and test results are starting points for review, not proof; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contracts, limits and what the import analysis cannot see.
 
 ## Requirements
 

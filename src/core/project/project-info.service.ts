@@ -32,6 +32,8 @@ export interface ProjectInfo {
     toolTimeoutMs: number;
     maxFilesScanned: number;
     maxHunksPerFile: number;
+    maxSourceFiles: number;
+    maxSourceFileBytes: number;
     defaultPageSize: number;
     maxPageSize: number;
   };
@@ -88,6 +90,8 @@ export class ProjectInfoService {
         toolTimeoutMs: limits.toolTimeoutMs,
         maxFilesScanned: limits.maxFilesScanned,
         maxHunksPerFile: limits.maxHunksPerFile,
+        maxSourceFiles: limits.maxSourceFiles,
+        maxSourceFileBytes: limits.maxSourceFileBytes,
         defaultPageSize: DEFAULT_PAGE_SIZE,
         maxPageSize: MAX_PAGE_SIZE,
       },

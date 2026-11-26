@@ -76,6 +76,10 @@ export function toolHandler<Args, Payload extends object>(
         log.info('tool call cancelled', { durationMs: elapsedMs(started) });
         return failure('CANCELLED: The request was cancelled.');
       }
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        log.warn('tool call timed out', { durationMs: elapsedMs(started) });
+        return failure('TIMEOUT: The analysis exceeded its time limit. Hint: narrow the request or reduce the depth.');
+      }
       if (error instanceof DevGuardError) {
         log.warn('tool call failed', { code: error.code, durationMs: elapsedMs(started), error });
         return failure(`${error.code}: ${error.message}${error.hint ? ` Hint: ${error.hint}` : ''}`);

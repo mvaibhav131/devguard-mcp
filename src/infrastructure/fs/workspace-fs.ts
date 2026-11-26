@@ -1,4 +1,4 @@
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -222,4 +222,41 @@ export async function isSameDirectory(a: string, b: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export type SkipReason = 'missing' | 'outside' | 'symlink' | 'too-large' | 'binary' | 'unreadable';
+
+export type ReadTextResult = { status: 'ok'; text: string } | { status: 'skipped'; reason: SkipReason };
+
+/**
+ * Reads one text file of the workspace. The path is confined first; links, non-files, oversized and binary
+ * files are skipped rather than read. A race between this check and the read is accepted for a local, read-only tool.
+ */
+export async function readWorkspaceText(root: string, relativePath: string, maxBytes: number): Promise<ReadTextResult> {
+  let absolutePath: string;
+  try {
+    absolutePath = (await confinePath(root, relativePath)).absolutePath;
+  } catch (error) {
+    const outside = error instanceof DevGuardError && error.code === 'PATH_OUTSIDE_WORKSPACE';
+    return { status: 'skipped', reason: outside ? 'outside' : 'unreadable' };
+  }
+
+  let info;
+  try {
+    info = await lstat(absolutePath);
+  } catch (error) {
+    return { status: 'skipped', reason: isMissing(error) ? 'missing' : 'unreadable' };
+  }
+  if (info.isSymbolicLink()) return { status: 'skipped', reason: 'symlink' };
+  if (!info.isFile()) return { status: 'skipped', reason: 'unreadable' };
+  if (info.size > maxBytes) return { status: 'skipped', reason: 'too-large' };
+
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(absolutePath);
+  } catch {
+    return { status: 'skipped', reason: 'unreadable' };
+  }
+  if (buffer.includes(0)) return { status: 'skipped', reason: 'binary' };
+  return { status: 'ok', text: buffer.toString('utf8') };
 }

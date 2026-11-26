@@ -1,20 +1,23 @@
-import { jsonBytes, takeWithinBudget } from '../../shared/budget.js';
+import { jsonBytes } from '../../shared/budget.js';
 import { DevGuardError } from '../../shared/errors.js';
 import type { Limits } from '../../shared/limits.js';
+import { pageWithinBudget, TRUNCATION_RESERVE_BYTES, type Truncation } from '../../shared/pagination.js';
 import { parseNameStatusZ, parseNulSeparatedPaths, parseNumstatZ, parsePatchSections } from './diff-parser.js';
 import { detectLanguage, type FileChange } from './diff.types.js';
 import type { DiffGitPort, DiffSpec } from './git-port.js';
 
 export type DiffMode = 'workingTree' | 'staged' | 'range';
-export type TruncationReason = 'FILE_LIMIT' | 'BYTE_BUDGET' | 'SCAN_LIMIT';
 export type HunkCoverage = 'complete' | 'partial' | 'unavailable';
 
-export interface AnalyzeDiffRequest {
+export interface ChangeSelection {
   mode: DiffMode;
   base?: string | undefined;
   head?: string | undefined;
   includeUntracked: boolean;
   paths?: readonly string[] | undefined;
+}
+
+export interface AnalyzeDiffRequest extends ChangeSelection {
   limit: number;
   offset: number;
 }
@@ -24,15 +27,17 @@ export interface ResolvedRef {
   sha: string;
 }
 
+export interface DiffSelectionInfo {
+  mode: DiffMode;
+  base?: ResolvedRef;
+  head?: ResolvedRef;
+  paths?: string[];
+  includeUntracked: boolean;
+}
+
 export interface DiffAnalysis {
   schemaVersion: 1;
-  selection: {
-    mode: DiffMode;
-    base?: ResolvedRef;
-    head?: ResolvedRef;
-    paths?: string[];
-    includeUntracked: boolean;
-  };
+  selection: DiffSelectionInfo;
   summary: {
     filesChanged: number;
     additions: number;
@@ -43,15 +48,20 @@ export interface DiffAnalysis {
   };
   hunkCoverage: HunkCoverage;
   files: FileChange[];
-  truncation: {
-    truncated: boolean;
-    reason?: TruncationReason;
-    returned: number;
-    total: number;
-    omitted: number;
-    nextOffset?: number;
-    hint?: string;
-  };
+  truncation: Truncation;
+}
+
+/** Every changed file of a selection, before ordering and paging. */
+export interface CollectedChanges {
+  spec: DiffSpec;
+  selection: DiffSelectionInfo;
+  pathspecs: string[];
+  tracked: FileChange[];
+  all: FileChange[];
+  /** Tracked changes were cut off by the git output cap or the file scan limit. */
+  trackedLimited: boolean;
+  /** Anything was cut off, including untracked files. */
+  scanLimited: boolean;
 }
 
 export interface DiffServiceDeps {
@@ -60,9 +70,6 @@ export interface DiffServiceDeps {
   confinePath: (input: string) => Promise<{ relativePath: string }>;
   limits: Limits;
 }
-
-// Space kept free in the response for the truncation object and its hint.
-const TRUNCATION_RESERVE_BYTES = 600;
 
 function invalidInput(message: string): DevGuardError {
   return new DevGuardError('INVALID_INPUT', message);
@@ -103,6 +110,34 @@ export class DiffService {
   constructor(private readonly deps: DiffServiceDeps) {}
 
   async analyze(request: AnalyzeDiffRequest, signal?: AbortSignal): Promise<DiffAnalysis> {
+    const { limits } = this.deps;
+    const collected = await this.collectChanges(request, signal);
+
+    const sorted = [...collected.all].sort(compareFiles);
+    const pageCandidates = sorted.slice(request.offset, request.offset + request.limit);
+
+    let hunkCoverage: HunkCoverage = 'unavailable';
+    if (collected.tracked.length > 0 && pageCandidates.some((file) => file.status !== 'untracked')) {
+      hunkCoverage = await this.attachHunks(collected, signal);
+    }
+
+    const summary = summarize(collected.all);
+    const skeleton = { schemaVersion: 1, selection: collected.selection, summary, hunkCoverage, files: [] as FileChange[] };
+    const { page, truncation } = pageWithinBudget(sorted, {
+      offset: request.offset,
+      limit: request.limit,
+      budgetBytes: limits.maxResponseBytes - jsonBytes(skeleton) - TRUNCATION_RESERVE_BYTES,
+      scanLimited: collected.scanLimited,
+      noun: 'files',
+      narrowAdvice: 'narrow the request with "paths"',
+      scanNote: `The change set is larger than DevGuard scans (limit ${limits.maxFilesScanned} files or the git output cap).`,
+    });
+
+    return { schemaVersion: 1, selection: collected.selection, summary, hunkCoverage, files: page, truncation };
+  }
+
+  /** Reads every changed file of the selection from git. Shared by the diff, impact and test tools. */
+  async collectChanges(request: ChangeSelection, signal?: AbortSignal): Promise<CollectedChanges> {
     const { git, limits } = this.deps;
     this.validateSelection(request);
 
@@ -178,51 +213,15 @@ export class DiffService {
       }
     }
 
-    const all = [...tracked, ...untracked];
-    const sorted = [...all].sort(compareFiles);
-    const pageFiles = sorted.slice(request.offset, request.offset + request.limit);
-
-    let hunkCoverage: HunkCoverage = 'unavailable';
-    if (tracked.length > 0 && pageFiles.some((file) => file.status !== 'untracked')) {
-      hunkCoverage = await this.attachHunks(spec, pathspecs, tracked, trackedLimited, signal);
-    }
-
-    const selection: DiffAnalysis['selection'] = { mode: request.mode, includeUntracked: request.includeUntracked };
+    const selection: DiffSelectionInfo = { mode: request.mode, includeUntracked: request.includeUntracked };
     if (base) selection.base = base;
     if (head) selection.head = head;
     if (request.paths !== undefined) selection.paths = paths;
 
-    const summary = summarize(all);
-    const skeleton = { schemaVersion: 1, selection, summary, hunkCoverage, files: [] as FileChange[] };
-    const budget = limits.maxResponseBytes - jsonBytes(skeleton) - TRUNCATION_RESERVE_BYTES;
-    const { taken, omitted: cutByBudget } = takeWithinBudget(pageFiles, Math.max(0, budget));
-
-    const total = all.length;
-    const returned = taken.length;
-    const remaining = Math.max(0, total - request.offset - returned);
-    const nextOffset = remaining > 0 ? request.offset + returned : undefined;
-
-    let reason: TruncationReason | undefined;
-    if (scanLimited) reason = 'SCAN_LIMIT';
-    else if (cutByBudget > 0) reason = 'BYTE_BUDGET';
-    else if (remaining > 0) reason = 'FILE_LIMIT';
-
-    const truncation: DiffAnalysis['truncation'] = {
-      truncated: reason !== undefined,
-      returned,
-      total,
-      omitted: remaining,
-    };
-    if (reason !== undefined) truncation.reason = reason;
-    if (nextOffset !== undefined) truncation.nextOffset = nextOffset;
-    if (reason !== undefined) {
-      truncation.hint = this.hint(reason, { returned, total, nextOffset, maxFilesScanned: limits.maxFilesScanned });
-    }
-
-    return { schemaVersion: 1, selection, summary, hunkCoverage, files: taken, truncation };
+    return { spec, selection, pathspecs, tracked, all: [...tracked, ...untracked], trackedLimited, scanLimited };
   }
 
-  private validateSelection(request: AnalyzeDiffRequest): void {
+  private validateSelection(request: ChangeSelection): void {
     if (request.mode === 'range') {
       if (!request.base) throw invalidInput('"base" is required when mode is "range".');
     } else if (request.base !== undefined || request.head !== undefined) {
@@ -231,7 +230,7 @@ export class DiffService {
   }
 
   private async resolveSpec(
-    request: AnalyzeDiffRequest,
+    request: ChangeSelection,
     hasHead: boolean,
     signal: AbortSignal | undefined,
   ): Promise<{ spec: DiffSpec; base?: ResolvedRef; head?: ResolvedRef }> {
@@ -256,14 +255,9 @@ export class DiffService {
   }
 
   // Sections of `git diff -U0` come in the same order as the entries of `--name-status`.
-  private async attachHunks(
-    spec: DiffSpec,
-    pathspecs: readonly string[],
-    tracked: readonly FileChange[],
-    trackedLimited: boolean,
-    signal: AbortSignal | undefined,
-  ): Promise<HunkCoverage> {
+  private async attachHunks(collected: CollectedChanges, signal: AbortSignal | undefined): Promise<HunkCoverage> {
     const { git, limits } = this.deps;
+    const { spec, pathspecs, tracked, trackedLimited } = collected;
     const patch = await git.readDiff({ spec, format: 'patch', pathspecs, maxBytes: limits.patchOutputCapBytes, signal });
 
     const sections = parsePatchSections(patch.data.toString('utf8'), limits.maxHunksPerFile);
@@ -283,20 +277,5 @@ export class DiffService {
 
     if (count === 0) return 'unavailable';
     return exact ? 'complete' : 'partial';
-  }
-
-  private hint(
-    reason: TruncationReason,
-    info: { returned: number; total: number; nextOffset: number | undefined; maxFilesScanned: number },
-  ): string {
-    const next = info.nextOffset === undefined ? '' : ` Call again with offset=${info.nextOffset} for the next page.`;
-    switch (reason) {
-      case 'SCAN_LIMIT':
-        return `The change set is larger than DevGuard scans (limit ${info.maxFilesScanned} files or the git output cap); counts are lower bounds. Narrow the request with "paths".${next}`;
-      case 'BYTE_BUDGET':
-        return `Response size limit reached after ${info.returned} files.${next} Use a smaller "limit" or narrow with "paths".`;
-      case 'FILE_LIMIT':
-        return `Returned ${info.returned} of ${info.total} files.${next} You can also narrow with "paths".`;
-    }
   }
 }
