@@ -1,2 +1,17 @@
-// stdout is reserved for the MCP JSON-RPC protocol, so diagnostics go to stderr.
-console.error('devguard-mcp: scaffold OK (MCP server not implemented yet)');
+import { loadConfig } from './config/config.js';
+import { createLogger } from './shared/logger.js';
+
+async function main(): Promise<void> {
+  const config = await loadConfig(process.argv.slice(2), process.env, process.cwd());
+  const logger = createLogger({ level: config.logLevel });
+
+  logger.info('devguard-mcp starting (MCP server not implemented yet)', {
+    workspaceRoot: config.workspaceRoot,
+    logLevel: config.logLevel,
+  });
+}
+
+main().catch((error: unknown) => {
+  createLogger({ level: 'error' }).error('startup failed', { error });
+  process.exitCode = 1;
+});
