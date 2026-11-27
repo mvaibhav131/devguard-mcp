@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from '../../src/server.js';
 import { DEFAULT_LIMITS } from '../../src/shared/limits.js';
 import { createLogger } from '../../src/shared/logger.js';
+import { riskOutputSchema } from '../../src/tools/assess-risk.tool.js';
+import { reviewOutputSchema } from '../../src/tools/review-changes.tool.js';
 import { impactOutputSchema } from '../../src/tools/analyze-change-impact.tool.js';
 import { testDiscoveryOutputSchema } from '../../src/tools/discover-tests.tool.js';
 import { createFixtureRepo, type FixtureRepo } from '../fixtures/fixture-repo.js';
@@ -78,8 +80,109 @@ describe('impact and test tools over the protocol', () => {
     expect(discovery.suggestedCommands[0]?.command).toBe('npx vitest run tests/service.test.ts');
   });
 
+  it('assess_risk returns an explainable, validated assessment with recommendations', async () => {
+    await repo.write('src/service.ts', "import { util } from './util';\nexport const service = util + 1;\n");
+    await repo.write('src/lonely.ts', 'export const lonely = 2;\n');
+
+    const result = await connection.client.callTool({ name: 'assess_risk', arguments: {} });
+
+    expect(result.isError).not.toBe(true);
+    const risk = riskOutputSchema.parse(result.structuredContent);
+    expect(risk.precision).toBe('heuristic');
+    expect(risk.factors.map((factor) => factor.id)).toEqual([
+      'change_size',
+      'change_spread',
+      'blast_radius',
+      'test_coverage_gap',
+      'critical_paths',
+      'change_kinds',
+    ]);
+    expect(risk.coverage).toBe(1);
+    expect(risk.recommendations.join('\n')).toContain('src/lonely.ts');
+    expect(risk.factors.every((factor) => factor.evidence.length > 0)).toBe(true);
+    const total = risk.factors.reduce((sum, factor) => sum + (factor.contribution ?? 0), 0);
+    expect(Math.abs(total - risk.overallScore)).toBeLessThanOrEqual(1);
+    expect(JSON.parse(textOf(result))).toEqual(result.structuredContent);
+  });
+
+  it('serves many parallel calls through the concurrency gate without losing any', async () => {
+    await repo.write('src/util.ts', 'export const util = 2;\n');
+    const names = ['analyze_git_diff', 'analyze_change_impact', 'discover_tests', 'assess_risk', 'analyze_git_diff', 'assess_risk'];
+
+    const results = await Promise.all(names.map((name) => connection.client.callTool({ name, arguments: {} })));
+
+    expect(results.map((result) => result.isError === true)).toEqual(names.map(() => false));
+  });
+
+  it('reports increasing progress for analyses when the client asks for it', async () => {
+    const updates: { progress: number; total?: number | undefined }[] = [];
+
+    await connection.client.callTool({ name: 'analyze_change_impact', arguments: {} }, { onprogress: (update) => updates.push(update) });
+
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    updates.slice(1).forEach((update, index) => expect(update.progress).toBeGreaterThan(updates[index]?.progress ?? Infinity));
+    expect(updates[updates.length - 1]).toMatchObject({ progress: 3, total: 3 });
+  });
+
+  it('offers the review prompt and validates its base argument', async () => {
+    const { prompts } = await connection.client.listPrompts();
+    expect(prompts.map((prompt) => prompt.name)).toEqual(['review_my_changes']);
+
+    const textOfPrompt = (result: Awaited<ReturnType<typeof connection.client.getPrompt>>): string =>
+      (result.messages[0]?.content as { text?: string } | undefined)?.text ?? '';
+
+    const plain = textOfPrompt(await connection.client.getPrompt({ name: 'review_my_changes', arguments: {} }));
+    for (const tool of ['analyze_git_diff', 'review_changes', 'analyze_change_impact', 'discover_tests', 'assess_risk']) expect(plain).toContain(tool);
+    expect(plain).not.toContain('mode "range"');
+
+    const range = textOfPrompt(await connection.client.getPrompt({ name: 'review_my_changes', arguments: { base: 'main' } }));
+    expect(range).toContain('mode "range" with base "main"');
+
+    await expect(connection.client.getPrompt({ name: 'review_my_changes', arguments: { base: '--output=x' } })).rejects.toThrow();
+  });
+
+  it('review_changes returns validated findings with masked evidence', async () => {
+    const awsKey = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+    await repo.write('src/service.ts', `import { util } from './util';\nexport const service = eval("1");\nconst key = '${awsKey}';\n`);
+
+    const result = await connection.client.callTool({ name: 'review_changes', arguments: { minSeverity: 'error' } });
+
+    expect(result.isError).not.toBe(true);
+    const review = reviewOutputSchema.parse(result.structuredContent);
+    expect(review.findings.map((finding) => `${finding.rule}:${finding.file}:${finding.line}`)).toEqual([
+      'dangerous-eval:src/service.ts:2',
+      'secret-aws-access-key:src/service.ts:3',
+    ]);
+    expect(review.precision).toBe('heuristic');
+    expect(JSON.stringify(result)).not.toContain(awsKey);
+    expect(JSON.parse(textOf(result))).toEqual(result.structuredContent);
+  });
+
+  it.each([
+    ['review_changes', { mode: 'range' }, 'INVALID_INPUT:'],
+    ['review_changes', { mode: 'range', base: '--output=x' }, 'INVALID_REF:'],
+    ['review_changes', { paths: ['../x'] }, 'PATH_OUTSIDE_WORKSPACE:'],
+  ])('%s reports a readable error for %j', async (name, args, prefix) => {
+    const result = await connection.client.callTool({ name, arguments: args });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result).startsWith(prefix)).toBe(true);
+  });
+
+  it('assess_risk with explicit files marks the git-based factors as unavailable', async () => {
+    const result = await connection.client.callTool({ name: 'assess_risk', arguments: { files: ['src/service.ts'] } });
+
+    const risk = riskOutputSchema.parse(result.structuredContent);
+    expect(risk.selection).toEqual({ source: 'files', files: ['src/service.ts'] });
+    expect(risk.coverage).toBe(0.7);
+    expect(risk.confidence).toBe('low');
+    expect(risk.factors.filter((factor) => factor.status === 'unavailable').map((factor) => factor.id)).toEqual(['change_size', 'change_kinds']);
+  });
+
   it.each([
     ['analyze_change_impact', { files: ['src/util.ts'], mode: 'staged' }, 'INVALID_INPUT:'],
+    ['assess_risk', { files: ['src/util.ts'], mode: 'staged' }, 'INVALID_INPUT:'],
+    ['assess_risk', { mode: 'range', base: '--output=x' }, 'INVALID_REF:'],
     ['analyze_change_impact', { files: ['../outside.ts'] }, 'PATH_OUTSIDE_WORKSPACE:'],
     ['discover_tests', { mode: 'range' }, 'INVALID_INPUT:'],
     ['discover_tests', { mode: 'range', base: '--output=x' }, 'INVALID_REF:'],
@@ -97,6 +200,12 @@ describe('impact and test tools over the protocol', () => {
       ['analyze_change_impact', { files: Array(101).fill('a.ts') }],
       ['discover_tests', { unknown: 1 }],
       ['discover_tests', { includeTests: true }],
+      ['assess_risk', { limit: 10 }],
+      ['assess_risk', { depth: 9 }],
+      ['review_changes', { files: ['src/a.ts'] }],
+      ['review_changes', { minSeverity: 'fatal' }],
+      ['review_changes', { categories: ['style'] }],
+      ['review_changes', { depth: 2 }],
     ] as const) {
       const result = await connection.client.callTool({ name, arguments: args });
       expect(result.isError).toBe(true);
@@ -131,6 +240,11 @@ describe('impact tool on a large change set', () => {
       });
       const secondImpact = impactOutputSchema.parse(second.structuredContent);
       expect(secondImpact.impacted.some((file) => firstImpact.impacted.some((other) => other.path === file.path))).toBe(false);
+
+      const risk = await connection.client.callTool({ name: 'assess_risk', arguments: { depth: 1 } });
+      const assessment = riskOutputSchema.parse(risk.structuredContent);
+      expect(Buffer.byteLength(textOf(risk), 'utf8')).toBeLessThanOrEqual(DEFAULT_LIMITS.maxResponseBytes);
+      expect(assessment.factors.find((factor) => factor.id === 'blast_radius')?.metrics).toMatchObject({ impactedFiles: 300 });
     } finally {
       await connection.close();
       await repo.cleanup();

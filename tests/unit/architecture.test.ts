@@ -44,12 +44,14 @@ describe('architecture boundaries', () => {
     expect(importers((specifier) => /^node:fs/.test(specifier))).toEqual(['infrastructure/fs/workspace-fs.ts']);
   });
 
-  it('confines the MCP SDK and zod to the entry points and the tools layer', () => {
+  it('confines the MCP SDK and zod to the entry points, the tools layer and the prompts', () => {
+    const allowed = (file: string): boolean => file === 'index.ts' || file === 'server.ts' || file.startsWith('tools/') || file.startsWith('prompts/');
+
     const sdkUsers = importers((specifier) => specifier.startsWith('@modelcontextprotocol/'));
-    expect(sdkUsers.every((file) => file === 'index.ts' || file === 'server.ts' || file.startsWith('tools/'))).toBe(true);
+    expect(sdkUsers.every(allowed)).toBe(true);
 
     const zodUsers = importers((specifier) => specifier.startsWith('zod'));
-    expect(zodUsers.every((file) => file.startsWith('tools/'))).toBe(true);
+    expect(zodUsers.every((file) => file.startsWith('tools/') || file.startsWith('prompts/'))).toBe(true);
   });
 
   it('never writes to stdout, which is reserved for the MCP protocol', () => {

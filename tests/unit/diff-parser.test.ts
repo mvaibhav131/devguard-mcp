@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  parseAddedLines,
   parseNameStatusZ,
   parseNulSeparatedPaths,
   parseNumstatZ,
@@ -115,6 +116,59 @@ describe('parsePatchSections', () => {
     expect(sections[3]?.hunks).toHaveLength(2);
     expect(sections[3]?.truncated).toBe(true);
     expect(sections[0]?.truncated).toBe(false);
+  });
+});
+
+describe('parseAddedLines', () => {
+  const patch = [
+    'diff --git a/src/a.ts b/src/a.ts',
+    'index 111..222 100644',
+    '--- a/src/a.ts',
+    '+++ b/src/a.ts',
+    '@@ -1,2 +1 @@',
+    '-old',
+    '-old2',
+    '+new line one',
+    '@@ -10 +9,0 @@ context',
+    '@@ -20,0 +20,2 @@',
+    '+first added',
+    '+++ second added that starts with plus signs',
+    '\\ No newline at end of file',
+    'diff --git a/b.bin b/b.bin',
+    'Binary files a/b.bin and b/b.bin differ',
+    'diff --git a/c.ts b/c.ts',
+    '--- /dev/null',
+    '+++ b/c.ts',
+    '@@ -0,0 +1,3 @@',
+    '+export const c = 1;\r',
+    '+',
+    '+// last',
+  ].join('\n');
+
+  it('returns the added lines of every file with their line numbers in the new file', () => {
+    const sections = parseAddedLines(patch, 100);
+
+    expect(sections).toHaveLength(3);
+    expect(sections[0]?.added).toEqual([
+      { line: 1, text: 'new line one' },
+      { line: 20, text: 'first added' },
+      { line: 21, text: '++ second added that starts with plus signs' },
+    ]);
+    expect(sections[1]?.added).toEqual([]);
+    expect(sections[2]?.added).toEqual([
+      { line: 1, text: 'export const c = 1;' },
+      { line: 2, text: '' },
+      { line: 3, text: '// last' },
+    ]);
+  });
+
+  it('does not mistake file headers for added lines and caps lines per file', () => {
+    const sections = parseAddedLines(patch, 2);
+
+    expect(sections[2]?.added).toHaveLength(2);
+    expect(sections[2]?.truncated).toBe(true);
+    expect(sections[0]?.truncated).toBe(true);
+    expect(parseAddedLines('', 10)).toEqual([]);
   });
 });
 
