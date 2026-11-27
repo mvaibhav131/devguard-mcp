@@ -20,7 +20,7 @@ All tools are read-only. Impact, test and risk results are starting points for r
 ## Prompt
 
 | Prompt | What it does |
-|---|---|
+|---|---|---|
 | `review_my_changes` | A template you pick in the chat. It tells the assistant to run the four analysis tools in order and to write a structured review report (summary, what changed, impact, test gaps, risk with evidence, recommended actions, limitations and confidence). Optional argument `base`, for example `main`, reviews the current branch like a pull request. It calls no model and only returns instruction text |
 
 ## Requirements
