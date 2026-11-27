@@ -63,6 +63,6 @@ export function registerDiscoverTestsTool(server: McpServer, deps: ToolRuntime &
       outputSchema: testDiscoveryOutputSchema,
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
     },
-    toolHandler(DISCOVER_TESTS, deps, (args, signal) => deps.service.discover(args, signal)),
+    toolHandler(DISCOVER_TESTS, deps, (args, signal, progress) => deps.service.discover(args, signal, progress)),
   );
 }

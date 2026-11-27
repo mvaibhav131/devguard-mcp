@@ -3,7 +3,9 @@ import path from 'node:path';
 import { jsonBytes } from '../../shared/budget.js';
 import type { Limits } from '../../shared/limits.js';
 import { pageWithinBudget, TRUNCATION_RESERVE_BYTES, type Truncation } from '../../shared/pagination.js';
-import { describeChanges, type ChangeSelectionInfo, type ChangedFile, type ChangeSetRequest, type ChangeSetResolver } from '../impact/change-set.js';
+import { NO_PROGRESS, type ProgressReporter } from '../../shared/progress.js';
+import { ANALYSIS_STEPS, prepareAnalysis } from '../impact/analysis-input.js';
+import { type ChangeSelectionInfo, type ChangedFile, type ChangeSet, type ChangeSetRequest, type ChangeSetResolver } from '../impact/change-set.js';
 import { walkImporters, type ImportGraph, type ImportGraphBuilder } from '../impact/import-graph.js';
 import { graphLimitations } from '../impact/limitations.js';
 import { isSourceFile } from '../impact/module-resolver.js';
@@ -18,6 +20,8 @@ export interface TestDiscoveryRequest extends ChangeSetRequest {
   limit: number;
   offset: number;
 }
+
+export type DiscoveryOptions = Pick<TestDiscoveryRequest, 'depth' | 'limit' | 'offset'>;
 
 export interface TestLink {
   path: string;
@@ -81,7 +85,7 @@ const TEST_LIMITATIONS: readonly string[] = [
   '"No mapped test" means no import or naming link was found. It is not proof that the code is untested, and a linked test may not exercise the change.',
   'Test files are recognised by name (*.test.* and *.spec.* files, and files under __tests__). Other layouts are not detected.',
   'The framework is detected from package.json, root configuration files and imports in test files.',
-  'Suggested commands are only suggestions and are never executed.',
+  'Suggested commands are only suggestions and are never executed. They use the framework defaults and do not know custom include or exclude rules, workspaces or separate configurations.',
 ];
 
 function quoteArgument(value: string): string {
@@ -93,12 +97,16 @@ const byPath = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 export class TestDiscoveryService {
   constructor(private readonly deps: TestDiscoveryDeps) {}
 
-  async discover(request: TestDiscoveryRequest, signal?: AbortSignal): Promise<TestDiscovery> {
-    const { changes, graphBuilder, limits } = this.deps;
+  async discover(request: TestDiscoveryRequest, signal?: AbortSignal, progress: ProgressReporter = NO_PROGRESS): Promise<TestDiscovery> {
+    const { changeSet, graph } = await prepareAnalysis(this.deps.changes, this.deps.graphBuilder, request, signal, progress);
+    const result = await this.discoverChangeSet(changeSet, graph, request);
+    progress(ANALYSIS_STEPS, ANALYSIS_STEPS, 'Done');
+    return result;
+  }
 
-    const changeSet = await changes.resolve(request, signal);
-    const { extraKnown } = describeChanges(changeSet.files);
-    const graph = await graphBuilder.build({ extraKnown, signal });
+  /** The discovery itself, for callers that already resolved the change set and built the graph. */
+  async discoverChangeSet(changeSet: ChangeSet, graph: ImportGraph, request: DiscoveryOptions): Promise<TestDiscovery> {
+    const { limits } = this.deps;
 
     const testFiles = [...graph.files].filter(isTestFile).sort(byPath);
     const frameworks = await this.detectFrameworks(graph, testFiles);

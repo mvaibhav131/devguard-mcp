@@ -48,6 +48,6 @@ export function registerGetProjectInfoTool(server: McpServer, deps: ToolRuntime 
       outputSchema: projectInfoOutputSchema,
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
     },
-    toolHandler(GET_PROJECT_INFO, deps, (_args, signal) => deps.service.getInfo(signal)),
+    toolHandler(GET_PROJECT_INFO, deps, (_args, signal) => deps.service.getInfo(signal), { gated: false }),
   );
 }

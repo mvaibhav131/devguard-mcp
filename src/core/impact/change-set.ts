@@ -7,6 +7,10 @@ export interface ChangedFile {
   path: string;
   status: FileStatus | 'explicit';
   oldPath?: string;
+  /** Line counts from git. Absent for explicit file lists, null for binary and untracked files. */
+  additions?: number | null;
+  deletions?: number | null;
+  isBinary?: boolean;
 }
 
 export interface ChangeSetRequest {
@@ -92,7 +96,13 @@ export class ChangeSetResolver {
     return {
       selection: { source: 'git', ...collected.selection },
       files: collected.all.map((file) => {
-        const changed: ChangedFile = { path: file.path, status: file.status };
+        const changed: ChangedFile = {
+          path: file.path,
+          status: file.status,
+          additions: file.additions,
+          deletions: file.deletions,
+          isBinary: file.isBinary,
+        };
         if (file.oldPath !== undefined) changed.oldPath = file.oldPath;
         return changed;
       }),

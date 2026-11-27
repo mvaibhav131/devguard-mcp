@@ -51,6 +51,8 @@ export interface BuildOptions {
   /** Changed paths that no longer exist, so that their importers can still be linked. */
   extraKnown: ReadonlySet<string>;
   signal?: AbortSignal | undefined;
+  /** Called after every source file that was read, with the number done and the total. */
+  onProgress?: ((done: number, total: number) => void) | undefined;
 }
 
 const CONFIG_FILE_BYTES = 256 * 1024;
@@ -83,10 +85,12 @@ export class ImportGraphBuilder {
 
     const skipped: Record<SkipReason, number> = { missing: 0, outside: 0, symlink: 0, 'too-large': 0, binary: 0, unreadable: 0 };
     const extracted = new Map<string, ExtractResult>();
+    let done = 0;
     await mapLimit(sourcePaths, limits.readConcurrency, signal, async (file) => {
       const outcome = await source.readText(file, limits.maxSourceFileBytes);
       if (outcome.status === 'ok') extracted.set(file, extractImports(outcome.text));
       else skipped[outcome.reason]++;
+      options.onProgress?.(++done, sourcePaths.length);
     });
 
     const files = new Set(extracted.keys());

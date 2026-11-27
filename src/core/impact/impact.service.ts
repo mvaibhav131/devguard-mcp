@@ -1,9 +1,11 @@
 import { jsonBytes } from '../../shared/budget.js';
 import type { Limits } from '../../shared/limits.js';
 import { pageWithinBudget, TRUNCATION_RESERVE_BYTES, type Truncation } from '../../shared/pagination.js';
+import { NO_PROGRESS, type ProgressReporter } from '../../shared/progress.js';
 import { isTestFile } from '../tests/test-files.js';
-import { describeChanges, type ChangeSelectionInfo, type ChangeSetRequest, type ChangeSetResolver } from './change-set.js';
-import { walkImporters, type ImportGraphBuilder, type UnresolvedImport } from './import-graph.js';
+import { ANALYSIS_STEPS, prepareAnalysis } from './analysis-input.js';
+import { describeChanges, type ChangeSelectionInfo, type ChangeSet, type ChangeSetRequest, type ChangeSetResolver } from './change-set.js';
+import { walkImporters, type ImportGraph, type ImportGraphBuilder, type UnresolvedImport } from './import-graph.js';
 import { graphLimitations, IMPACT_LIMITATIONS } from './limitations.js';
 import { isSourceFile } from './module-resolver.js';
 
@@ -13,6 +15,8 @@ export interface ImpactRequest extends ChangeSetRequest {
   limit: number;
   offset: number;
 }
+
+export type ImpactOptions = Pick<ImpactRequest, 'depth' | 'includeTests' | 'limit' | 'offset'>;
 
 export interface ImpactedFile {
   path: string;
@@ -57,12 +61,17 @@ const MAX_UNRESOLVED_ITEMS = 20;
 export class ImpactService {
   constructor(private readonly deps: ImpactServiceDeps) {}
 
-  async analyze(request: ImpactRequest, signal?: AbortSignal): Promise<ImpactAnalysis> {
-    const { changes, graphBuilder, limits } = this.deps;
+  async analyze(request: ImpactRequest, signal?: AbortSignal, progress: ProgressReporter = NO_PROGRESS): Promise<ImpactAnalysis> {
+    const { changeSet, graph } = await prepareAnalysis(this.deps.changes, this.deps.graphBuilder, request, signal, progress);
+    const result = this.analyzeChangeSet(changeSet, graph, request);
+    progress(ANALYSIS_STEPS, ANALYSIS_STEPS, 'Done');
+    return result;
+  }
 
-    const changeSet = await changes.resolve(request, signal);
-    const { changedPaths, extraKnown, seeds } = describeChanges(changeSet.files);
-    const graph = await graphBuilder.build({ extraKnown, signal });
+  /** The analysis itself, for callers that already resolved the change set and built the graph. */
+  analyzeChangeSet(changeSet: ChangeSet, graph: ImportGraph, request: ImpactOptions): ImpactAnalysis {
+    const { limits } = this.deps;
+    const { changedPaths, seeds } = describeChanges(changeSet.files);
 
     const hits = walkImporters(graph, seeds, request.depth, changedPaths);
     let impacted: ImpactedFile[] = [...hits].map(([path, hit]) => ({

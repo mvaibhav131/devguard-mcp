@@ -53,7 +53,12 @@ const ASSET_EXTENSIONS: ReadonlySet<string> = new Set([
 export function isSourceFile(filePath: string): boolean {
   const extension = path.posix.extname(filePath);
   if (!SOURCE_EXTENSIONS.includes(extension)) return false;
-  return !filePath.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
+  return !hasExcludedSegment(filePath);
+}
+
+/** True for paths inside generated or third-party folders such as node_modules, dist or coverage. */
+export function hasExcludedSegment(filePath: string): boolean {
+  return filePath.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
 }
 
 export type UnresolvedReason =

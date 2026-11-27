@@ -11,10 +11,18 @@ export interface Limits {
   patchOutputCapBytes: number;
   maxFilesScanned: number;
   maxHunksPerFile: number;
+  /** Added lines examined per file by the review rules. */
+  maxReviewLinesPerFile: number;
+  /** Untracked files whose content is read by the review rules. */
+  maxReviewUntrackedFiles: number;
+  /** Findings collected before the review stops. */
+  maxReviewFindings: number;
   /** Source files read to build the import graph. */
   maxSourceFiles: number;
   maxSourceFileBytes: number;
   readConcurrency: number;
+  /** Tool calls that may run at the same time. Further calls wait, so parallel requests cannot pile up processes. */
+  maxConcurrentCalls: number;
   shutdownTimeoutMs: number;
 }
 
@@ -26,9 +34,13 @@ export const DEFAULT_LIMITS: Readonly<Limits> = {
   patchOutputCapBytes: 2 * 1024 * 1024,
   maxFilesScanned: 5_000,
   maxHunksPerFile: 20,
+  maxReviewLinesPerFile: 5_000,
+  maxReviewUntrackedFiles: 100,
+  maxReviewFindings: 2_000,
   maxSourceFiles: 5_000,
   maxSourceFileBytes: 512 * 1024,
   readConcurrency: 16,
+  maxConcurrentCalls: 2,
   shutdownTimeoutMs: 3_000,
 };
 

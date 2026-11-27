@@ -2,7 +2,7 @@ import { jsonBytes } from '../../shared/budget.js';
 import { DevGuardError } from '../../shared/errors.js';
 import type { Limits } from '../../shared/limits.js';
 import { pageWithinBudget, TRUNCATION_RESERVE_BYTES, type Truncation } from '../../shared/pagination.js';
-import { parseNameStatusZ, parseNulSeparatedPaths, parseNumstatZ, parsePatchSections } from './diff-parser.js';
+import { parseAddedLines, parseNameStatusZ, parseNulSeparatedPaths, parseNumstatZ, parsePatchSections, type AddedLine } from './diff-parser.js';
 import { detectLanguage, type FileChange } from './diff.types.js';
 import type { DiffGitPort, DiffSpec } from './git-port.js';
 
@@ -219,6 +219,38 @@ export class DiffService {
     if (request.paths !== undefined) selection.paths = paths;
 
     return { spec, selection, pathspecs, tracked, all: [...tracked, ...untracked], trackedLimited, scanLimited };
+  }
+
+  /**
+   * The added lines of the tracked changes, by path, from the same patch that provides hunks.
+   * `aligned` is false when the patch cannot be matched with the file list, in which case nothing is returned.
+   */
+  async readAddedLines(
+    collected: CollectedChanges,
+    signal?: AbortSignal,
+  ): Promise<{ byPath: Map<string, AddedLine[]>; complete: boolean; aligned: boolean; truncatedFiles: string[] }> {
+    const { git, limits } = this.deps;
+    const { spec, pathspecs, tracked, trackedLimited } = collected;
+    const byPath = new Map<string, AddedLine[]>();
+    const truncatedFiles: string[] = [];
+    if (tracked.length === 0) return { byPath, complete: true, aligned: true, truncatedFiles };
+
+    const patch = await git.readDiff({ spec, format: 'patch', pathspecs, maxBytes: limits.patchOutputCapBytes, signal });
+    const sections = parseAddedLines(patch.data.toString('utf8'), limits.maxReviewLinesPerFile);
+    // The last section of a cut-off patch may be incomplete.
+    const usable = patch.truncated ? sections.slice(0, -1) : sections;
+
+    const exact = !patch.truncated && !trackedLimited;
+    if (exact && usable.length !== tracked.length) return { byPath, complete: false, aligned: false, truncatedFiles };
+
+    for (let index = 0; index < Math.min(usable.length, tracked.length); index++) {
+      const section = usable[index];
+      const file = tracked[index];
+      if (!section || !file) continue;
+      if (section.added.length > 0) byPath.set(file.path, section.added);
+      if (section.truncated) truncatedFiles.push(file.path);
+    }
+    return { byPath, complete: exact, aligned: true, truncatedFiles };
   }
 
   private validateSelection(request: ChangeSelection): void {

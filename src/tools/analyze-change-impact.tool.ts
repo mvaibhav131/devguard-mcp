@@ -68,6 +68,6 @@ export function registerAnalyzeChangeImpactTool(server: McpServer, deps: ToolRun
       outputSchema: impactOutputSchema,
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
     },
-    toolHandler(ANALYZE_CHANGE_IMPACT, deps, (args, signal) => deps.service.analyze(args, signal)),
+    toolHandler(ANALYZE_CHANGE_IMPACT, deps, (args, signal, progress) => deps.service.analyze(args, signal, progress)),
   );
 }

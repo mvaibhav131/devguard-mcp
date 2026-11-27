@@ -1,19 +1,10 @@
 import { DevGuardError } from '../../shared/errors.js';
-import { MAX_REF_LENGTH } from '../../shared/limits.js';
+import { isSafeRefName } from '../../shared/refs.js';
 
-// Starts with an alphanumeric character, so a ref can never be parsed as a command line option.
-const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/@~^-]*$/;
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export function validateRefInput(ref: string): string {
-  const valid =
-    ref.length > 0 &&
-    ref.length <= MAX_REF_LENGTH &&
-    REF_PATTERN.test(ref) &&
-    !ref.includes('..') &&
-    !ref.includes('//');
-
-  if (!valid) {
+  if (!isSafeRefName(ref)) {
     throw new DevGuardError('INVALID_REF', `Invalid git ref ${JSON.stringify(ref.slice(0, 80))}.`, {
       hint: 'Use a branch, tag, commit SHA or HEAD~N. Ranges such as "a..b" and options are not accepted.',
     });
