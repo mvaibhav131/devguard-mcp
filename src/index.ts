@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { loadConfig } from './config/config.js';

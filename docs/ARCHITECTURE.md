@@ -1,6 +1,6 @@
 # DevGuard MCP — Architecture
 
-Status: describes what Phases 1 and 3 implement: the foundation, git diff analysis, change impact analysis and test discovery. Review rules (Phase 2) and risk assessment (Phase 4) are planned in the roadmap.
+Status: all planned phases are implemented: foundation, git diff, review rules, change impact, test discovery, risk assessment, hardening and packaging preparation.
 
 ## 1. Principles
 
@@ -24,18 +24,23 @@ src/
 │   ├── get-project-info.tool.ts
 │   ├── analyze-git-diff.tool.ts
 │   ├── analyze-change-impact.tool.ts
-│   └── discover-tests.tool.ts
+│   ├── discover-tests.tool.ts
+│   ├── assess-risk.tool.ts
+│   └── review-changes.tool.ts
+├── prompts/                      MCP prompts: templates the user picks (review-my-changes.prompt.ts)
 ├── core/                         domain logic, no SDK and no I/O imports
 │   ├── diff/                     diff service, pure parsers, git port
 │   ├── impact/                   import extractor, module resolver, tsconfig paths, import graph, impact service
 │   ├── tests/                    test file rules, test discovery service
+│   ├── risk/                     risk model (weights, bands, scales), factors, risk service
+│   ├── review/                   review rules (line and file rules), review service
 │   └── project/                  project info service
 ├── infrastructure/               the only places with side effects
 │   ├── process/process-runner.ts spawn without shell: timeout, byte cap, abort
 │   ├── git/                      git-runner (allowlist, env), git-args (validators), git-client (typed methods)
 │   ├── fs/workspace-fs.ts        workspace root, path confinement, symlink checks, safe text reads
 │   └── workspace-source-files.ts file listing through git + safe reads, for the import graph
-└── shared/                       errors, logger (stderr), limits, budget, pagination, concurrency, version
+└── shared/                       errors, logger (stderr), limits, budget, pagination, concurrency, semaphore, progress, refs, version
 tests/{unit,integration,protocol,stdio,fixtures}
 ```
 
@@ -43,7 +48,7 @@ Boundary rules are enforced by `tests/unit/architecture.test.ts`:
 
 - `core/` imports no SDK, zod, `node:fs`, `node:child_process` or outer layer.
 - Only `process-runner.ts` spawns processes and only `workspace-fs.ts` touches the filesystem.
-- The MCP SDK is imported only by `index.ts`, `server.ts` and `tools/`; zod only by `tools/`.
+- The MCP SDK is imported only by `index.ts`, `server.ts`, `tools/` and `prompts/`; zod only by `tools/` and `prompts/`.
 - Nothing in `src/` writes to stdout.
 
 To add a tool: write the service in `core/`, add a port method if it needs new git data, add `tools/<name>.tool.ts`, register it in `server.ts`, add its name to `tool-names.ts`.
@@ -64,6 +69,10 @@ Transport is stdio: VS Code starts the server as a child process and speaks JSON
 Shutdown. The reliable path is the client closing stdin. `SIGINT` and `SIGTERM` are best effort because Windows may kill the process without a signal. On a signal, an uncaught exception or an unhandled rejection the server closes the transport, waits at most 3 seconds, then exits (0 for signals, 1 for crashes). The server is stateless and holds no locks or temp files, so being killed is safe.
 
 Cancellation. Each call combines the client's cancel signal with a 30 second deadline. The signal reaches the process runner, which kills the git process. A git process also has its own 15 second limit.
+
+Concurrency. At most two tool calls (`maxConcurrentCalls`) run at the same time; the others wait in order. This stops a client that fires several calls in parallel from piling up git processes and graph builds. The 30 second deadline includes the time spent waiting, and a call that is cancelled while waiting leaves the queue. `get_project_info` is light and skips the gate.
+
+Progress. When the client sends a progress token, the impact, test and risk tools report `notifications/progress` in three steps (reading the changed files, reading source files with a running count, analysing) and a final update. Progress only increases, intermediate updates are throttled to one every 250 ms, and failures to send are ignored, because progress is best effort. It is not verified how each VS Code build displays them.
 
 ## 4. Tools
 
@@ -109,6 +118,53 @@ Same selection inputs as `analyze_change_impact` (without `includeTests`). Outpu
 
 "No mapped test" means no import or naming link was found. It is not proof that code is untested, and DevGuard neither runs tests nor measures coverage.
 
+### review_changes
+
+Reviews the lines that the changes add, with deterministic rules, and returns findings with evidence.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `mode`, `base`, `head`, `includeUntracked`, `paths` | as in `analyze_git_diff` | `workingTree` | where the changes come from; explicit `files` are not accepted |
+| `minSeverity` | `error` / `warning` / `info` | `info` | only report this severity or higher |
+| `categories` | subset of `security`, `correctness`, `maintainability`, `tests` | all | only run the rules of these categories |
+| `limit`, `offset` | int | 50, 0 | paging over findings |
+
+Only added lines are examined. For tracked changes they come from `git diff -U0`, the same patch that provides hunks, matched to the file list by position. For untracked files every line counts as added; at most 100 untracked files are read, 5000 lines each. Lock files, generated files and `node_modules`, `dist`, `build` and `coverage` are skipped, as are binary and deleted files. Code rules skip comment lines; the TODO, suppression and secret rules also read comments.
+
+| Category | Rules (id, severity) |
+|---|---|
+| security | `secret-private-key`, `secret-aws-access-key`, `secret-github-token`, `secret-slack-token` (error); `secret-generic-assignment` (warning, hard-coded credentials assigned to names such as password, token, api key, with placeholders ignored); `dangerous-eval` (error); `tls-verification-disabled` (error); `dangerous-html`, `command-injection-risk`, `weak-hash`, `insecure-random` (warning); `plain-http-url` (info) |
+| correctness | `ts-suppression`, `empty-catch`, `debugger-statement` (warning); `eslint-disable`, `any-type` (info) |
+| tests | `focused-test` (error); `skipped-test`, `missing-tests` (warning). `missing-tests` comes from the test discovery tool: a changed source file that no test imports or shares a name with |
+| maintainability | `console-output`, `todo-marker`, `large-added-block` (400 or more added lines in one file) (info) |
+
+Output: `precision: "heuristic"`, `selection`, `summary` (files reviewed, added lines scanned, findings, counts by severity and category), `coverage` (untracked files read, skipped files, whether the patch was complete and matched), `rulesRun`, `rules` (each triggered rule once, with description, suggestion and count), `limitations[]`, `findings[]` and `truncation`. A finding has `rule`, `category`, `severity`, `file`, optional `line` and `evidence`. Findings are ordered by severity, then file, then line, so paging is stable. At most 20 findings per rule and file are listed, and the rest is counted in the limitations.
+
+**Secrets are masked in the evidence** (`[REDACTED]`) and never leave the server, not in the result, the text rendering or the logs. A missing finding does not prove that no secret was added.
+
+The rules are line based regular expressions, not a parser, so they also fire on strings that merely contain a pattern. Reviewing DevGuard's own repository flags the rule definitions and test fixtures for that reason. That is expected: treat findings as leads to verify, which the tool description tells the assistant to say.
+
+### assess_risk
+
+Estimates the regression risk of the changes with a fixed, documented model. Inputs are the selection inputs of `analyze_change_impact` (`mode`, `base`, `head`, `includeUntracked`, `paths`, `files`, `depth`) without paging. The change set and the import graph are built once and feed both the impact and the test analysis.
+
+The overall score is the sum of the factor contributions, rounded. A factor contributes `weight x normalized x 100`. Every measured value is scaled linearly: at or below the low mark it scores 0, at or above the high mark it scores 1.
+
+| Factor | Weight | Measured | Low mark to high mark | Confidence |
+|---|---|---|---|---|
+| `change_size` | 0.20 | lines added plus deleted | 20 to 800 lines | high |
+| `change_spread` | 0.10 | changed files, and top-level folders (the higher scale counts) | 3 to 30 files, 1 to 6 folders | high |
+| `blast_radius` | 0.25 | files importing the changed files, and the largest direct importer count (the higher scale counts) | 2 to 40 files, 2 to 20 importers | medium (low when the graph was limited) |
+| `test_coverage_gap` | 0.20 | share of changed source files without a mapped test, times 0.75 when test files changed too | 0 to 1 | medium |
+| `critical_paths` | 0.15 | changed files in sensitive areas, by name: dependencies, CI/CD, environment, build config, security, database, payments (tests and documentation excluded for the last three) | 0 to 4 files | low |
+| `change_kinds` | 0.10 | points: deleted source 1, renamed source 0.5, type change 1, unmerged 3 | 0 to 5 points | high |
+
+Bands: low 0 to 24, medium 25 to 49, high 50 to 74, critical 75 to 100. The weights, scales and bands are constants in `core/risk/risk-model.ts`. `scoreVersion` changes whenever any of them changes.
+
+Output: `precision: "heuristic"`, `scoreVersion`, `selection`, `overallScore`, `band`, `bands`, `coverage` (share of the total weight that could be computed), `confidence`, `factors[]` (id, name, weight, status, `metrics`, normalized, contribution, confidence, `evidence[]`, `limitations[]`), `recommendations[]` (derived from the factors by fixed rules), `suggestedCommands`, `limitations[]` and `changed` counts.
+
+Explainability rules: every factor lists the numbers behind it and at most five pieces of evidence (file paths and counts). Nothing is hidden in the total. A factor that cannot be computed, for example the line-based ones for an explicit `files` list, is reported as `unavailable` and counts as 0, which can understate the risk. The score is not rescaled; `coverage` shows how much of it was computed, and confidence is `low` below 0.8.
+
 ### How imports are found, and what that cannot see
 
 The import graph is rebuilt on every call from the files git lists (so `.gitignore` is respected), skipping `node_modules`, `dist`, `build`, `coverage` and similar folders. A comment, string, template and regex aware scanner finds static `import`, `export ... from`, `import("literal")` and `require("literal")`. Specifiers resolve through relative paths (including `.js` to `.ts` mapping and `index` files), `tsconfig.json` or `jsconfig.json` `paths` and `baseUrl` (relative `extends` followed), and everything else counts as an external package.
@@ -124,6 +180,12 @@ The import graph is rebuilt on every call from the files git lists (so `.gitigno
 
 A regular-expression and tokenizer based scanner can still be fooled by unusual syntax. Every result says so in `limitations`.
 
+### Prompt: review_my_changes
+
+MCP has three primitives: tools (the model decides to call them), resources (the application attaches data) and prompts (the user picks a template). DevGuard offers one prompt. It does not call any model. It returns a fixed instruction text that tells the assistant to run `analyze_git_diff`, `analyze_change_impact`, `discover_tests` and `assess_risk` in that order and to write a structured report: summary, what changed, impact, test gaps, risk with evidence, recommended actions, limitations and confidence. The rules inside the text require quoting evidence, stating that impact, test and risk results are heuristic, following truncation hints, and never claiming that tests pass or fail.
+
+The optional argument `base` (a branch, tag or commit, validated with the same ref grammar as the tools) switches every tool call to `range` mode. Because the prompt is only text, the report structure can be reviewed and changed without touching any analysis code.
+
 ## 5. Bounded output
 
 | Limit | Default | Behaviour when exceeded |
@@ -133,6 +195,7 @@ A regular-expression and tokenizer based scanner can still be fooled by unusual 
 | Files scanned | 5000, git output 4 MiB | `SCAN_LIMIT`, counts are lower bounds |
 | Patch output | 2 MiB | `hunkCoverage` becomes `partial` |
 | Hunks per file | 20 | `hunksTruncated` |
+| Review: added lines per file / untracked files read / findings kept | 5000 / 100 / 2000 | listed in `limitations`; at most 20 findings per rule and file are listed |
 | Source files read for the import graph | 5000 files, 512 KiB each, 16 reads at a time | extra files are skipped; `graph.limited` and `limitations` say so, `truncation.reason = SCAN_LIMIT` |
 | Git process / tool call | 15 s / 30 s | `GIT_TIMEOUT` / `TIMEOUT` |
 
@@ -148,7 +211,7 @@ At least one item is always returned so that paging makes progress. Timeouts are
 | Refs | strict character grammar (starts alphanumeric, no `..`), then resolved with `rev-parse --verify --end-of-options`; later commands use only full commit ids |
 | Paths | repository-relative POSIX form; rejects `..`, absolute, drive, UNC and device paths, control characters, Windows reserved names and alternate data streams; the resolved real path must stay inside the root, so symlinks and junctions cannot escape |
 | File reads | only through `readWorkspaceText`: confined path, links and non-files skipped, size cap, binary files skipped; nothing is written anywhere |
-| Output | bounded (section 5); errors never expose stack traces; the full workspace path is never returned |
+| Output | bounded (section 5); errors never expose stack traces; the full workspace path is never returned; secrets found by the review rules are masked before they are put into any result |
 | Logging | JSON lines on stderr, never stdout; the logger never throws |
 | Prompt injection | file names and refs are data. They are returned inside JSON fields and never interpreted by the server. The model must treat them as untrusted |
 | Supply chain | two runtime dependencies (`@modelcontextprotocol/server`, `zod`), exact versions, committed lockfile |
@@ -175,25 +238,27 @@ CI runs on Windows and Linux.
 - **Metadata-only diff.** Hunk ranges, no patch text.
 - **Own import scanner instead of the TypeScript compiler API.** No third runtime dependency, and it works on code that does not compile. The price is the heuristic limits listed above.
 - **Graph rebuilt per call.** Stateless and always current. Cost is bounded by the limits; a cache keyed by file timestamps is a Phase 5 option.
-- **Tools only.** Resources and prompts are deferred.
+- **Tools plus one prompt.** `review_my_changes` is a user-selected template. Resources are deferred: nothing needs an addressable document yet.
+- **Packaging is prepared, publishing is not decided.** `bin` maps `devguard-mcp` to `dist/index.js` (with a shebang and LF line endings in the build), `files` ships only compiled JavaScript and the README, `prepack` builds and `prepublishOnly` runs the type check and tests, and CI runs `npm audit` and `npm pack --dry-run`. The package stays `private` until the owner chooses a license and decides to publish.
 
 ## 9. Known limitations and risks
 
 - It is not verified how each VS Code build presents `content` versus `structuredContent` to the model; the response budget assumes the worst case of both being sent.
 - VS Code's MCP configuration format is in transition (`.vscode/mcp.json` with `servers` versus `.mcp.json` with `mcpServers`).
 - A repository can define clean filters that git runs when comparing the working tree. Repository commands for diffs are disabled, but run DevGuard only on repositories you trust.
-- Concurrent tool calls are not rate limited.
+- At most two tool calls run at the same time; further calls wait, and the deadline includes the wait.
+- The import graph is rebuilt on every call (about a second for a few thousand files), so back-to-back tool calls repeat that work. A short-lived cache is possible but would add state and invalidation rules; it is not implemented.
 - Untracked files have no line counts, and the TypeScript and JavaScript scope is by file extension only.
-- Impact and test results are heuristic (see section 4). They are a starting point for review and every result carries `precision: heuristic` and its limitations. Impact and test tools need a git repository, because files are listed through git.
-- Test files are recognised by name only (`*.test.*`, `*.spec.*`, `__tests__/`), and a linked test may not exercise the change.
-- Planned risk scores (Phase 4) will use fixed documented weights and return every factor with its evidence, so the score is explainable.
+- Impact, test and risk results are heuristic (see section 4). They are a starting point for review and every result carries `precision: heuristic` and its limitations. The impact, test and risk tools need a git repository, because files are listed through git.
+- Test files are recognised by name only (`*.test.*`, `*.spec.*`, `__tests__/`), and a linked test may not exercise the change. Suggested commands use framework defaults.
+- The risk model is an opinion. Weights and scales are fixed and documented, but they were not calibrated on real defect data; treat the score as a conversation starter and read the factors, not only the number.
 
 ## 10. Roadmap
 
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | foundation, `get_project_info`, `analyze_git_diff` | done |
-| 2 | `review_changes`: deterministic rule engine with evidence | planned |
+| 2 | `review_changes`: deterministic rules with evidence | done |
 | 3 | `analyze_change_impact` and `discover_tests` | done |
-| 4 | `assess_risk`: fixed weights, factor breakdown, evidence | planned |
-| 5 | hardening, progress notifications, optional resources and prompts, npm packaging | planned |
+| 4 | `assess_risk`: fixed weights, factor breakdown, evidence | done |
+| 5 | hardening (concurrency gate), progress notifications, review prompt, packaging preparation | done; publishing to npm is the owner's decision |

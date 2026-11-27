@@ -2,8 +2,31 @@
   "name": "devguard-mcp",
   "version": "0.1.0",
   "description": "Deterministic engineering analysis MCP server for AI coding assistants.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-review",
+    "git",
+    "impact-analysis",
+    "risk-assessment"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mvaibhav131/devguard-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mvaibhav131/devguard-mcp/issues"
+  },
+  "homepage": "https://github.com/mvaibhav131/devguard-mcp#readme",
   "private": true,
   "type": "module",
+  "bin": {
+    "devguard-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -12,7 +35,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:stdio": "npm run build && vitest run --config vitest.stdio.config.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",

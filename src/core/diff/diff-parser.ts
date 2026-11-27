@@ -95,6 +95,53 @@ export interface PatchSection {
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
+export interface AddedLine {
+  /** Line number in the new version of the file. */
+  line: number;
+  text: string;
+}
+
+export interface AddedLinesSection {
+  added: AddedLine[];
+  /** True when the file had more added lines than the per-file cap. */
+  truncated: boolean;
+}
+
+/**
+ * Extracts the added lines, with their line numbers, from `git diff -U0` output.
+ * One section per changed file in git's order, like parsePatchSections.
+ */
+export function parseAddedLines(patch: string, maxLinesPerFile: number): AddedLinesSection[] {
+  const sections: AddedLinesSection[] = [];
+  let current: AddedLinesSection | undefined;
+  let inHunk = false;
+  let newLine = 0;
+
+  for (const rawLine of patch.split('\n')) {
+    if (rawLine.startsWith('diff --git ') || rawLine.startsWith('diff --cc ') || rawLine.startsWith('diff --combined ')) {
+      current = { added: [], truncated: false };
+      sections.push(current);
+      inHunk = false;
+      continue;
+    }
+    if (!current) continue;
+
+    const header = HUNK_HEADER.exec(rawLine);
+    if (header) {
+      inHunk = true;
+      newLine = Number(header[3]);
+      continue;
+    }
+    // Before the first hunk the lines are file headers ("+++ b/file"), not content.
+    if (!inHunk || !rawLine.startsWith('+')) continue;
+
+    if (current.added.length >= maxLinesPerFile) current.truncated = true;
+    else current.added.push({ line: newLine, text: rawLine.slice(1).replace(/\r$/, '') });
+    newLine++;
+  }
+  return sections;
+}
+
 /**
  * Extracts hunk ranges from `git diff -U0` output, one section per changed file in git's order.
  * Content lines always start with "+", "-", " " or "\", so a line starting with "diff " is a file header.

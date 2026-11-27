@@ -6,6 +6,8 @@ import { ImpactService } from './core/impact/impact.service.js';
 import { ImportGraphBuilder } from './core/impact/import-graph.js';
 import { DiffService } from './core/diff/diff.service.js';
 import { ProjectInfoService } from './core/project/project-info.service.js';
+import { RiskService } from './core/risk/risk.service.js';
+import { ReviewService } from './core/review/review.service.js';
 import { TestDiscoveryService } from './core/tests/test-discovery.service.js';
 import { confinePath } from './infrastructure/fs/workspace-fs.js';
 import { GitClient } from './infrastructure/git/git-client.js';
@@ -13,11 +15,15 @@ import { GitRunner } from './infrastructure/git/git-runner.js';
 import { WorkspaceSourceFiles } from './infrastructure/workspace-source-files.js';
 import { DEFAULT_LIMITS, type Limits } from './shared/limits.js';
 import type { Logger } from './shared/logger.js';
+import { Semaphore } from './shared/semaphore.js';
 import { SERVER_NAME, SERVER_VERSION } from './shared/version.js';
 import { registerAnalyzeChangeImpactTool } from './tools/analyze-change-impact.tool.js';
 import { registerAnalyzeGitDiffTool } from './tools/analyze-git-diff.tool.js';
+import { registerAssessRiskTool } from './tools/assess-risk.tool.js';
 import { registerDiscoverTestsTool } from './tools/discover-tests.tool.js';
 import { registerGetProjectInfoTool } from './tools/get-project-info.tool.js';
+import { registerReviewMyChangesPrompt } from './prompts/review-my-changes.prompt.js';
+import { registerReviewChangesTool } from './tools/review-changes.tool.js';
 import { TOOL_NAMES } from './tools/tool-names.js';
 
 export interface ServerDeps {
@@ -41,6 +47,8 @@ export function createServer(deps: ServerDeps): McpServer {
   const graphBuilder = new ImportGraphBuilder({ source, limits });
   const impactService = new ImpactService({ changes, graphBuilder, limits });
   const testDiscoveryService = new TestDiscoveryService({ changes, graphBuilder, source, limits });
+  const riskService = new RiskService({ changes, graphBuilder, impact: impactService, tests: testDiscoveryService, limits });
+  const reviewService = new ReviewService({ diff: diffService, source, tests: testDiscoveryService, limits });
   const projectInfoService = new ProjectInfoService({
     git,
     workspaceRoot,
@@ -52,11 +60,14 @@ export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
   server.server.onclose = () => logger.info('connection closed');
 
-  const runtime = { logger, limits };
+  const runtime = { logger, limits, gate: new Semaphore(limits.maxConcurrentCalls) };
   registerGetProjectInfoTool(server, { ...runtime, service: projectInfoService });
   registerAnalyzeGitDiffTool(server, { ...runtime, service: diffService });
   registerAnalyzeChangeImpactTool(server, { ...runtime, service: impactService });
   registerDiscoverTestsTool(server, { ...runtime, service: testDiscoveryService });
+  registerAssessRiskTool(server, { ...runtime, service: riskService });
+  registerReviewChangesTool(server, { ...runtime, service: reviewService });
+  registerReviewMyChangesPrompt(server);
 
   return server;
 }
